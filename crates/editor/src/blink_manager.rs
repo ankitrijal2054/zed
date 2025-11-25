@@ -1,8 +1,8 @@
-use gpui::Context;
+use gpui::{Context, FocusHandle};
 use settings::SettingsStore;
 use smol::Timer;
 use std::time::Duration;
-use ui::App;
+use ui::{App, Window};
 
 pub struct BlinkManager {
     blink_interval: Duration,
@@ -11,21 +11,34 @@ pub struct BlinkManager {
     blinking_paused: bool,
     /// Whether the cursor should be visibly rendered or not.
     visible: bool,
-    /// Whether the blinking currently enabled.
-    enabled: bool,
+    /// The focus handle to use to determine if the cursor should be blinking.
+    focus_handle: FocusHandle,
     /// Whether the blinking is enabled in the settings.
-    blink_enabled_in_settings: fn(&App) -> bool,
+    is_enabled: Box<dyn Fn(&App) -> bool>,
 }
 
 impl BlinkManager {
     pub fn new(
         blink_interval: Duration,
-        blink_enabled_in_settings: fn(&App) -> bool,
+        focus_handle: FocusHandle,
+        is_enabled: impl Fn(&App) -> bool + 'static,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // Make sure we blink the cursors if the setting is re-enabled
-        cx.observe_global::<SettingsStore>(move |this, cx| {
-            this.blink_cursors(this.blink_epoch, cx)
+        cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
+            this.refresh(window, cx);
+        })
+        .detach();
+
+        cx.on_focus(&focus_handle, window, move |this, window, cx| {
+            this.visible = false;
+            this.refresh(window, cx);
+        })
+        .detach();
+
+        cx.on_blur(&focus_handle, window, move |this, _window, _cx| {
+            this.visible = false;
         })
         .detach();
 
@@ -34,9 +47,13 @@ impl BlinkManager {
             blink_epoch: 0,
             blinking_paused: false,
             visible: true,
-            enabled: false,
-            blink_enabled_in_settings,
+            focus_handle,
+            is_enabled: Box::new(is_enabled),
         }
+    }
+
+    pub fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.blink_cursors(self.blink_epoch, window, cx)
     }
 
     fn next_blink_epoch(&mut self) -> usize {
@@ -44,38 +61,50 @@ impl BlinkManager {
         self.blink_epoch
     }
 
-    pub fn pause_blinking(&mut self, cx: &mut Context<Self>) {
+    pub fn pause_blinking(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_cursor(cx);
 
         let epoch = self.next_blink_epoch();
         let interval = self.blink_interval;
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             Timer::after(interval).await;
-            this.update(cx, |this, cx| this.resume_cursor_blinking(epoch, cx))
+            this.update_in(cx, |this, window, cx| {
+                this.resume_cursor_blinking(epoch, window, cx)
+            })
         })
         .detach();
     }
 
-    fn resume_cursor_blinking(&mut self, epoch: usize, cx: &mut Context<Self>) {
+    fn resume_cursor_blinking(
+        &mut self,
+        epoch: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if epoch == self.blink_epoch {
             self.blinking_paused = false;
-            self.blink_cursors(epoch, cx);
+            self.blink_cursors(epoch, window, cx);
         }
     }
 
-    fn blink_cursors(&mut self, epoch: usize, cx: &mut Context<Self>) {
-        if (self.blink_enabled_in_settings)(cx) {
-            if epoch == self.blink_epoch && self.enabled && !self.blinking_paused {
+    fn blink_cursors(&mut self, epoch: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if (self.is_enabled)(cx) {
+            if epoch == self.blink_epoch
+                && self.focus_handle.is_focused(window)
+                && !self.blinking_paused
+            {
                 self.visible = !self.visible;
                 cx.notify();
 
                 let epoch = self.next_blink_epoch();
                 let interval = self.blink_interval;
-                cx.spawn(async move |this, cx| {
+                cx.spawn_in(window, async move |this, cx| {
                     Timer::after(interval).await;
                     if let Some(this) = this.upgrade() {
-                        this.update(cx, |this, cx| this.blink_cursors(epoch, cx))
-                            .ok();
+                        this.update_in(cx, |this, window, cx| {
+                            this.blink_cursors(epoch, window, cx)
+                        })
+                        .ok();
                     }
                 })
                 .detach();
@@ -90,25 +119,6 @@ impl BlinkManager {
             self.visible = true;
             cx.notify();
         }
-    }
-
-    /// Enable the blinking of the cursor.
-    pub fn enable(&mut self, cx: &mut Context<Self>) {
-        if self.enabled {
-            return;
-        }
-
-        self.enabled = true;
-        // Set cursors as invisible and start blinking: this causes cursors
-        // to be visible during the next render.
-        self.visible = false;
-        self.blink_cursors(self.blink_epoch, cx);
-    }
-
-    /// Disable the blinking of the cursor.
-    pub fn disable(&mut self, _cx: &mut Context<Self>) {
-        self.visible = false;
-        self.enabled = false;
     }
 
     pub fn visible(&self) -> bool {

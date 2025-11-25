@@ -1886,16 +1886,26 @@ impl Editor {
 
         let selections = SelectionsCollection::new();
 
+        let focus_handle = cx.focus_handle();
+
         let blink_manager = cx.new(|cx| {
-            let mut blink_manager = BlinkManager::new(
-                CURSOR_BLINK_INTERVAL,
-                |cx| EditorSettings::get_global(cx).cursor_blink,
-                cx,
-            );
             if is_minimap {
-                blink_manager.disable(cx);
+                BlinkManager::new(
+                    CURSOR_BLINK_INTERVAL,
+                    focus_handle.clone(),
+                    |_cx| false,
+                    window,
+                    cx,
+                )
+            } else {
+                BlinkManager::new(
+                    CURSOR_BLINK_INTERVAL,
+                    focus_handle.clone(),
+                    |cx| EditorSettings::get_global(cx).cursor_blink,
+                    window,
+                    cx,
+                )
             }
-            blink_manager
         });
 
         let soft_wrap_mode_override =
@@ -2095,7 +2105,6 @@ impl Editor {
 
         let inlay_hint_settings =
             inlay_hint_settings(selections.newest_anchor().head(), &buffer_snapshot, cx);
-        let focus_handle = cx.focus_handle();
         if !is_minimap {
             cx.on_focus(&focus_handle, window, Self::handle_focus)
                 .detach();
@@ -2292,15 +2301,7 @@ impl Editor {
                         cx.observe_global_in::<SettingsStore>(window, Self::settings_changed),
                         observe_buffer_font_size_adjustment(cx, |_, cx| cx.notify()),
                         cx.observe_window_activation(window, |editor, window, cx| {
-                            let active = window.is_window_active();
-                            editor.blink_manager.update(cx, |blink_manager, cx| {
-                                if active {
-                                    blink_manager.enable(cx);
-                                } else {
-                                    blink_manager.disable(cx);
-                                }
-                            });
-                            if active {
+                            if window.is_window_active() {
                                 editor.show_mouse_cursor(cx);
                             }
                         }),
@@ -3321,7 +3322,9 @@ impl Editor {
             }
         }
 
-        self.blink_manager.update(cx, BlinkManager::pause_blinking);
+        self.blink_manager.update(cx, |blink_manager, cx| {
+            blink_manager.pause_blinking(window, cx)
+        });
         cx.emit(EditorEvent::SelectionsChanged { local });
 
         let selections = &self.selections.disjoint_anchors_arc();
@@ -22161,7 +22164,6 @@ impl Editor {
                 blame.update(cx, GitBlame::focus)
             }
 
-            self.blink_manager.update(cx, BlinkManager::enable);
             self.show_cursor_names(window, cx);
             self.buffer.update(cx, |buffer, cx| {
                 buffer.finalize_last_transaction(cx);
@@ -22209,7 +22211,6 @@ impl Editor {
     }
 
     pub fn handle_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.blink_manager.update(cx, BlinkManager::disable);
         self.buffer
             .update(cx, |buffer, cx| buffer.remove_active_selections(cx));
 
