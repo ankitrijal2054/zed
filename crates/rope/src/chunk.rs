@@ -127,11 +127,16 @@ impl Chunk {
 
     #[track_caller]
     #[inline(always)]
-    pub fn assert_char_boundary(&self, offset: usize) {
+    pub fn assert_char_boundary<const PANIC: bool>(&self, offset: usize) -> bool {
         if self.is_char_boundary(offset) {
-            return;
+            return true;
         }
-        panic_char_boundary(&self.text, offset);
+        if PANIC {
+            panic_char_boundary(&self.text, offset);
+        } else {
+            log_err_char_boundary(&self.text, offset);
+            false
+        }
     }
 }
 
@@ -201,10 +206,7 @@ impl<'a> ChunkSlice<'a> {
     }
 
     #[inline(always)]
-    pub fn slice(self, range: Range<usize>) -> Self {
-        let mask = (1 as Bitmap)
-            .unbounded_shl(range.end as u32)
-            .wrapping_sub(1);
+    pub fn slice(self, mut range: Range<usize>) -> Self {
         if range.start == MAX_BASE {
             Self {
                 chars: 0,
@@ -214,8 +216,15 @@ impl<'a> ChunkSlice<'a> {
                 text: "",
             }
         } else {
-            self.assert_char_boundary(range.start);
-            self.assert_char_boundary(range.end);
+            if !self.assert_char_boundary::<false>(range.start) {
+                range.start = self.text.ceil_char_boundary(range.start);
+            }
+            if !self.assert_char_boundary::<false>(range.end) {
+                range.end = self.text.floor_char_boundary(range.end);
+            }
+            let mask = (1 as Bitmap)
+                .unbounded_shl(range.end as u32)
+                .wrapping_sub(1);
             Self {
                 chars: (self.chars & mask) >> range.start,
                 chars_utf16: (self.chars_utf16 & mask) >> range.start,
@@ -352,13 +361,15 @@ impl<'a> ChunkSlice<'a> {
 
     #[track_caller]
     #[inline(always)]
-    pub fn assert_char_boundary<const PANIC: bool>(&self, offset: usize) {
+    pub fn assert_char_boundary<const PANIC: bool>(&self, offset: usize) -> bool {
         if self.is_char_boundary(offset) {
-            return;
+            return true;
         }
         if PANIC {
             panic_char_boundary(self.text, offset);
-        } else { // remove this comment, press enter and await
+        } else {
+            log_err_char_boundary(self.text, offset);
+            false
         }
     }
 
@@ -645,7 +656,7 @@ fn nth_set_bit(v: u128, n: usize) -> usize {
 #[cold]
 #[inline(never)]
 #[track_caller]
-fn panic_char_boundary(text: &str, offset: usize) {
+fn panic_char_boundary(text: &str, offset: usize) -> ! {
     if offset > text.len() {
         panic!(
             "byte index {} is out of bounds of `{:?}` (length: {})",
